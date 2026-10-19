@@ -1,0 +1,20 @@
+{
+  "servers": [
+    {
+      "name": "aliyun",
+      "host": "aliyun",
+      "region": "cn",
+      "label": "国内线路（阿里云北京）"
+    },
+    {
+      "name": "rack-nerd",
+      "host": "rack-nerd",
+      "region": "overseas",
+      "label": "海外线路（RackNerd 洛杉矶）"
+    }
+  ],
+  "keywords": ["修真", "剑", "都市", "斗破苍穹"],
+  "timeout": 25,
+  "threads": 10,
+  "js_runtime": "node"
+}

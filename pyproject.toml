@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "legado-validator"
+version = "1.0.0"
+description = "Legado 书源校验器：多节点实测、剔除无效源、区分国内/海外可用性"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+dependencies = ["requests>=2.25"]
+
+[project.scripts]
+legado-validator = "legado_validator.cli:main"
+
+[tool.setuptools]
+packages = ["legado_validator"]
+
+[tool.setuptools.package-data]
+legado_validator = ["js/*.js"]

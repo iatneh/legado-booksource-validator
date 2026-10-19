@@ -1,0 +1,23 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.coverage
+htmlcov/
+*.log
+.DS_Store
+.idea/
+.vscode/
+
+# 运行时产物
+work/
+dist/
+*.result.json
+spec_*.json
+res_*.json
+config/servers.json

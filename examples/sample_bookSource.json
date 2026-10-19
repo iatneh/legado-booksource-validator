@@ -1,0 +1,59 @@
+[
+ {
+  "bookSourceName": "示例书源·普通规则",
+  "bookSourceUrl": "https://example.com",
+  "bookSourceGroup": "示例分组",
+  "bookSourceType": 0,
+  "enabled": true,
+  "enabledExplore": true,
+  "searchUrl": "https://example.com/search?keyword={{key}}&page={{page}}",
+  "ruleSearch": {
+   "name": "class.title@text",
+   "author": "class.author@text",
+   "bookList": "@css:.book-item",
+   "bookUrl": "@css:.title a@href",
+   "intro": "class.intro@text",
+   "lastChapter": "class.last@text",
+   "checkKeyWord": "剑"
+  },
+  "ruleBookInfo": {
+   "name": "class.title@text",
+   "author": "class.author@text",
+   "intro": "class.intro@text"
+  },
+  "ruleToc": {
+   "chapterList": "@css:.chapter-list li",
+   "chapterName": "text",
+   "chapterUrl": "tag.a@href"
+  },
+  "ruleContent": {
+   "content": "class.content@text"
+  }
+ },
+ {
+  "bookSourceName": "示例书源·JS 规则",
+  "bookSourceUrl": "https://example.org",
+  "bookSourceGroup": "示例分组",
+  "bookSourceType": 0,
+  "enabled": true,
+  "enabledExplore": true,
+  "searchUrl": "@js:\nresult = baseUrl + '/s?q=' + encodeURIComponent(key) + '&p=' + page;\nresult;",
+  "ruleSearch": {
+   "name": "class.name@text",
+   "author": "class.author@text",
+   "bookList": "@css:.result-item",
+   "bookUrl": "@css:.name a@href"
+  },
+  "ruleBookInfo": {
+   "name": "class.name@text"
+  },
+  "ruleToc": {
+   "chapterList": "@css:.list li",
+   "chapterName": "text",
+   "chapterUrl": "tag.a@href"
+  },
+  "ruleContent": {
+   "content": "class.text@text"
+  }
+ }
+]
