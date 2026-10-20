@@ -3,6 +3,7 @@ const fs = require('fs');
 const vm = require('vm');
 const cp = require('child_process');
 const crypto = require('crypto');
+const legadoJs = require('./legado_js.js');
 
 const SRC = process.argv[2];
 const OUT = process.argv[3];
@@ -71,8 +72,9 @@ function curlFetch(url, opts) {
   const method = String(opts.method || 'GET').toUpperCase();
   const headers = opts.headers || {};
   const tmp = '/tmp/.legado_' + process.pid + '_' + Math.random().toString(36).slice(2);
+  const hdr = '/tmp/.legado_h_' + process.pid + '_' + Math.random().toString(36).slice(2);
   const args = ['-sS', '-L', '--max-time', '25', '--compressed', '-A', opts.ua || UA,
-    '-o', tmp, '-w', '%{http_code}'];
+    '-D', hdr, '-o', tmp, '-w', '%{http_code}'];
   Object.keys(headers || {}).forEach(function (k) {
     if (headers[k] !== undefined && headers[k] !== null) args.push('-H', k + ': ' + headers[k]);
   });
@@ -93,8 +95,24 @@ function curlFetch(url, opts) {
   let body = '';
   try { body = fs.readFileSync(tmp, 'utf8'); } catch (e) { body = ''; }
   try { fs.unlinkSync(tmp); } catch (e) { /* ignore */ }
+  // 响应头（-D 抓到的最后一组，因为 -L 会跟跳转）
+  let respHeaders = {};
+  try {
+    const raw = fs.readFileSync(hdr, 'utf8');
+    const blocks = raw.split(/\r?\n\r?\n/).filter(function (b) { return /^\s*HTTP\//m.test(b); });
+    const last = blocks.length ? blocks[blocks.length - 1] : raw;
+    last.split(/\r?\n/).forEach(function (line) {
+      const i = line.indexOf(':');
+      if (i > 0) {
+        const k = line.slice(0, i).trim().toLowerCase();
+        const v = line.slice(i + 1).trim();
+        if (k) respHeaders[k] = v;
+      }
+    });
+  } catch (e) { /* ignore */ }
+  try { fs.unlinkSync(hdr); } catch (e) { /* ignore */ }
   const code = parseInt(String(out).trim(), 10) || 0;
-  return { code: code, body: body, error: code ? null : 'curl_failed' };
+  return { code: code, body: body, headers: respHeaders, error: code ? null : 'curl_failed' };
 }
 
 function makeResp(r, url) {
@@ -103,7 +121,7 @@ function makeResp(r, url) {
     body: function () { return r.body; },
     json: function () { try { return JSON.parse(r.body); } catch (e) { return null; } },
     code: function () { return r.code; },
-    headers: function () { return {}; },
+    headers: function () { return r.headers || {}; },
     baseUrl: function () { return url; },
     url: function () { return url; },
     toString: function () { return r.body; },
@@ -111,8 +129,50 @@ function makeResp(r, url) {
   };
 }
 
-function makeJava(ctx, calls) {
-  const store = {};
+/* Legado 的 StrResponse（java.connect 的返回值） */
+function makeStrResponse(res) {
+  const body = res.r.body || '';
+  return {
+    url: function () { return res.url; },
+    body: function () { return body; },
+    code: function () { return res.r.code; },
+    message: function () { return res.r.code >= 400 ? ('HTTP ' + res.r.code) : 'OK'; },
+    headers: function () { return res.r.headers || {}; },
+    isSuccessful: function () { return res.r.code >= 200 && res.r.code < 300; },
+    raw: function () {
+      return { request: function () { return { url: function () { return res.url; } }; } };
+    },
+    toString: function () { return body; },
+    valueOf: function () { return body; }
+  };
+}
+
+/* Legado 的 Jsoup Connection.Response（java.get / java.post 的返回值） */
+function makeJsoupResponse(res) {
+  const body = res.r.body || '';
+  return {
+    header: function (n) {
+      const hs = res.r.headers || {};
+      const key = String(n).toLowerCase();
+      for (const k of Object.keys(hs)) {
+        if (k.toLowerCase() === key) return hs[k];
+      }
+      return null;
+    },
+    headers: function () { return res.r.headers || {}; },
+    body: function () { return body; },
+    statusCode: function () { return res.r.code; },
+    url: function () { return res.url; },
+    cookies: function () { return []; },
+    charset: function () { return 'UTF-8'; },
+    parse: function () { return legadoJs.jsoupDocument(body, res.url); },
+    toString: function () { return body; },
+    valueOf: function () { return body; }
+  };
+}
+
+function makeJava(ctx, calls, store) {
+  const vars = store || {};
   function norm(url, a, b) {
     let opts = { method: 'GET', headers: {}, body: null };
     let u = String(url === undefined || url === null ? '' : url).trim();
@@ -151,15 +211,41 @@ function makeJava(ctx, calls) {
     rec.len = r.body ? r.body.length : 0;
     rec.error = r.error;
     calls.push(rec);
-    return makeResp(r, n.url);
+    return { r: r, url: n.url, opts: n.opts };
   }
+  function isUrl(v) { return /^https?:\/\//i.test(String(v || '').trim()); }
   const base = {
-    ajax: doReq,
-    get: function (url, a, b) { const n = norm(url, a, b); n.opts.method = 'GET'; return doReq(n.url, n.opts, null); },
-    post: function (url, body, a) { const n = norm(url, a); n.opts.method = 'POST'; n.opts.body = body; return doReq(n.url, n.opts, null); },
-    connect: function (url, a) { const n = norm(url, a); return doReq(n.url, n.opts, null); },
-    webView: function (url) { const r = curlFetch(url, {}); return r.body; },
-    put: function (k, v) { if (v === undefined) return store[k]; store[k] = v; return v; },
+    /* Legado: java.ajax(url) 返回响应体字符串 */
+    ajax: function (url, a, b) {
+      const res = doReq(url, a, b);
+      return res.r.body || '';
+    },
+    /* Legado: java.connect(url) 返回 StrResponse */
+    connect: function (url, header) {
+      const res = doReq(url, header);
+      return makeStrResponse(res);
+    },
+    /* Legado: java.get(url, headers) 返回 Jsoup Response；
+       单参数时是变量存储（AnalyzeRule.get） */
+    get: function (url, headers) {
+      if (headers === undefined && !isUrl(url)) {
+        return vars[url] === undefined ? '' : vars[url];
+      }
+      const res = doReq(url, { headers: headers || {} });
+      return makeJsoupResponse(res);
+    },
+    /* Legado: java.post(url, body, headers) 返回 Jsoup Response */
+    post: function (url, body, headers) {
+      const res = doReq(url, { method: 'POST', body: body, headers: headers || {} });
+      return makeJsoupResponse(res);
+    },
+    webView: function (html, url, js) {
+      if (typeof html === 'string' && html.indexOf('<') >= 0) return html;
+      const res = doReq(html || url, {});
+      return res.r.body || '';
+    },
+    /* 变量存储（和 source.put / source.get 同一份） */
+    put: function (k, v) { if (v === undefined) return vars[k]; vars[k] = v; return v; },
     encodeURI: function (s) { return encodeURIComponent(String(s)); },
     decodeURI: function (s) { try { return decodeURIComponent(String(s)); } catch (e) { return s; } },
     md5: function (s) { return crypto.createHash('md5').update(String(s)).digest('hex'); },
@@ -183,7 +269,8 @@ function makeJava(ctx, calls) {
   });
 }
 
-function makeSource(src) {
+function makeSource(src, store) {
+  const vars = store || {};
   return {
     getVariable: function () { return '{}'; },
     getKey: function () { return KEY; },
@@ -192,8 +279,9 @@ function makeSource(src) {
     getCookie: function () { return ''; },
     getLoginInfo: function () { return ''; },
     getLoginInfoMap: function () { return {}; },
-    getVariableMap: function () { return {}; },
-    get: function () { return ''; },
+    getVariableMap: function () { return vars; },
+    put: function (k, v) { if (v === undefined) return vars[k]; vars[k] = v; return v; },
+    get: function (k) { return vars[k] === undefined ? '' : vars[k]; },
     getBook: function () { return null; }
   };
 }
@@ -230,45 +318,26 @@ function javaStub(name) {
 }
 
 function jsoupStub() {
-  return {
-    Jsoup: {
-      parse: function (html) {
-        const h = String(html || '');
-        return {
-          select: function (sel) {
-            return {
-              attr: function (n) {
-                if (String(sel).indexOf('form') >= 0) {
-                  const m = h.match(/<form[^>]*action=["']([^"']+)["']/i);
-                  return m ? m[1] : '';
-                }
-                const nm = String(sel).match(/name=([\w-]+)/);
-                if (nm) {
-                  const re = new RegExp('<input[^>]*name=["\']' + nm[1] + '["\'][^>]*value=["\']([^"\']*)["\']', 'i');
-                  const m2 = h.match(re);
-                  if (m2) return m2[1];
-                  const re2 = new RegExp('<input[^>]*value=["\']([^"\']*)["\'][^>]*name=["\']' + nm[1] + '["\']', 'i');
-                  const m3 = h.match(re2);
-                  if (m3) return m3[1];
-                }
-                return '';
-              },
-              text: function () { return ''; },
-              first: function () { return this; }
-            };
-          },
-          text: function () { return h; }
-        };
-      }
-    }
-  };
+  return legadoJs.jsoupStub();
 }
 
 function buildSandbox(src, base, ctx, calls) {
+  const store = {};
+  const jsoup = legadoJs.jsoupStub(base);
+  /* Packages.org.jsoup.Jsoup 要能真的解析 HTML；其余 Packages.* 走通用桩 */
+  const packages = new Proxy({}, {
+    get: function (t, p) {
+      if (p === 'org') return { jsoup: jsoup };
+      if (p === 'java') return javaStub('Packages.java');
+      if (p === 'javax') return javaStub('Packages.javax');
+      return javaStub('Packages.' + String(p));
+    }
+  });
   const sandbox = {
     key: ctx.key, page: ctx.page, baseUrl: base, bookSourceUrl: base,
-    source: makeSource(src), java: makeJava(ctx, calls), cookie: makeCookie(),
-    Packages: javaStub('Packages'), org: jsoupStub(),
+    source: makeSource(src, store), java: makeJava(ctx, calls, store),
+    cookie: makeCookie(),
+    Packages: packages, org: jsoup,
     cache: makeCache(), result: undefined, book: undefined, chapter: undefined,
     JSON: JSON, Math: Math, Date: Date, String: String, Number: Number,
     Array: Array, Object: Object, RegExp: RegExp, parseInt: parseInt,

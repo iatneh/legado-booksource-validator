@@ -16,7 +16,6 @@ import shutil
 import subprocess
 import sys
 import tarfile
-import tempfile
 import time
 
 from . import config as cfg
@@ -74,24 +73,158 @@ def _load_results(specs):
     return results
 
 
+def _load_overrides(specs):
+    """把重测结果按 index 归并成 {server: {index: result}}。"""
+    over = {}
+    for item in (specs or []):
+        name, path = item.split('=', 1)
+        with open(path, 'r', encoding='utf-8') as fh:
+            rows = json.load(fh)
+        bucket = over.setdefault(name, {})
+        for r in rows:
+            if r.get('i') is not None:
+                bucket[r['i']] = r
+    return over
+
+
+def _load_drop_keys(path):
+    """读取重复书源清单 -> {(书源名, 书源地址): 记录}。
+
+    清单是去重脚本产出的 JSON 数组，每项至少含 bookSourceName /
+    bookSourceUrl，可另带 searchEndpoint / keptAs 等说明字段。
+    """
+    if not path:
+        return {}
+    with open(path, 'r', encoding='utf-8') as fh:
+        data = json.load(fh)
+    out = {}
+    for rec in data:
+        key = (rec.get('bookSourceName'), rec.get('bookSourceUrl'))
+        out[key] = rec
+    return out
+
+
 def cmd_merge(args, conf):
     with open(args.src, 'r', encoding='utf-8') as fh:
         sources = json.load(fh)
     results = _load_results(args.result)
+    overrides = _load_overrides(getattr(args, 'override', None))
+    drops = _load_drop_keys(getattr(args, 'drop_duplicates', None))
     result = merge(sources, results, cn_server=args.cn_server,
-                   overseas_server=args.overseas_server)
+                   overseas_server=args.overseas_server,
+                   overrides_by_server=overrides, drop_keys=drops)
     paths = write_outputs(result, args.out_dir)
-    _log('总书源: %d  保留: %d  剔除: %d  需外网: %d  实测可用: %d' % (
+    _log('总书源: %d  保留: %d  剔除: %d  重复剔除: %d  需外网: %d  仅国内: %d  实测可用: %d' % (
         len(sources), len(result['kept']), len(result['removed']),
-        len(result['overseas']), len(result['verified'])))
+        len(result.get('dropped') or []), len(result['overseas']),
+        len(result.get('cn_only') or []), len(result['verified'])))
     for key in sorted(result['stats']):
         _log('  %-22s %d' % (key, result['stats'][key]))
     for name, path in sorted(paths.items()):
         _log('  输出 %-24s %s' % (name, path))
     report = build_report(sources, result['kept'], result['removed'],
-                          list(results.keys()))
+                          list(results.keys()), groups=result.get('groups'),
+                          extra=_parse_notes(getattr(args, 'note', None)),
+                          duplicates=result.get('dropped'))
     rp = write_report(report, os.path.join(args.out_dir, 'report.md'))
     _log('  输出 %-24s %s' % ('report.md', rp))
+    return 0
+
+
+def _parse_notes(items):
+    """把 --note 参数整理成报告里的附加条目。
+
+    支持两种写法：``key=value``（渲染成 "- key：value"）和纯文本
+    （渲染成 "- 文本"）。
+    """
+    out = []
+    for it in (items or []):
+        it = str(it).strip()
+        if not it:
+            continue
+        if '=' in it:
+            k, v = it.split('=', 1)
+            out.append('%s：%s' % (k.strip(), v.strip()))
+        else:
+            out.append(it)
+    return out
+
+
+def cmd_repair(args, conf):
+    from .repair import repair_all
+    with open(args.src, 'r', encoding='utf-8') as fh:
+        sources = json.load(fh)
+    with open(args.spec, 'r', encoding='utf-8') as fh:
+        specs = json.load(fh)
+    only = None
+    if args.only:
+        only = [int(x) for x in args.only.replace(' ', '').split(',') if x]
+    fixed, report = repair_all(
+        sources, specs, args.server, args.out, args.report,
+        result_path=args.result, timeout=args.timeout, kw0=args.kw,
+        keywords=conf.get('keywords'), user_agent=conf.get('user_agent'),
+        only=only, progress=_log)
+    ok = sum(1 for v in report.values() if v.get('ok'))
+    _log('节点 %s 修复成功 %d / 尝试 %d' % (args.server, len(fixed), len(report)))
+    _log('输出 %s' % args.out)
+    _log('输出 %s' % args.report)
+    return 0
+
+
+def cmd_deeprepair(args, conf):
+    """从真实页面反推并修复目录/正文规则。"""
+    from .deeprepair import deep_repair_all
+    with open(args.src, 'r', encoding='utf-8') as fh:
+        sources = json.load(fh)
+    with open(args.spec, 'r', encoding='utf-8') as fh:
+        specs = json.load(fh)
+    only = None
+    if args.only:
+        only = [int(x) for x in args.only.replace(' ', '').split(',') if x]
+    fixed, report = deep_repair_all(
+        sources, specs, args.server, args.out, args.report,
+        result_path=args.result, timeout=args.timeout, kw0=args.kw,
+        keywords=conf.get('keywords'), user_agent=conf.get('user_agent'),
+        only=only, progress=_log)
+    ok = sum(1 for v in report.values() if v.get('ok'))
+    _log('节点 %s 深链修复成功 %d / 尝试 %d' % (args.server, ok, len(report)))
+    _log('输出 %s' % args.out)
+    _log('输出 %s' % args.report)
+    return 0
+
+
+def cmd_explore(args, conf):
+    """补全缺失的发现页规则。"""
+    from .explore import supplement_all
+    with open(args.src, 'r', encoding='utf-8') as fh:
+        sources = json.load(fh)
+    only = None
+    if args.only:
+        only = [int(x) for x in args.only.replace(' ', '').split(',') if x]
+    fixed, report = supplement_all(
+        sources, timeout=args.timeout, user_agent=conf.get('user_agent'),
+        only=only, progress=_log, force=getattr(args, 'force', False))
+    with open(args.out, 'w', encoding='utf-8') as fh:
+        json.dump(fixed, fh, ensure_ascii=False, indent=1)
+    with open(args.report, 'w', encoding='utf-8') as fh:
+        json.dump(report, fh, ensure_ascii=False, indent=1)
+    _log('发现页规则补全 %d 条（尝试 %d 条）' % (len(fixed), len(report)))
+    _log('输出 %s' % args.out)
+    _log('输出 %s' % args.report)
+    return 0
+
+
+def cmd_patch(args, conf):
+    """把修复结果 / 发现页补全结果合并回书源列表。"""
+    from .patcher import patch_sources, write_patched
+    with open(args.src, 'r', encoding='utf-8') as fh:
+        sources = json.load(fh)
+    repairs = [p.split('=', 1)[1] for p in (args.repair or [])]
+    explores = [p.split('=', 1)[1] for p in (args.explore or [])]
+    out, stats = patch_sources(sources, repairs, explores)
+    write_patched(out, args.out)
+    _log('打补丁完成: 修复规则 %d 条, 发现页规则 %d 条 -> %s' % (
+        stats['repair_applied'], stats['explore_applied'], args.out))
     return 0
 
 
@@ -199,10 +332,56 @@ def build_parser():
     sp.add_argument('--src', required=True)
     sp.add_argument('--result', action='append', required=True,
                     help='节点名=结果文件，可重复')
+    sp.add_argument('--override', action='append',
+                    help='节点名=修复后重测结果文件，可重复（按下标覆盖）')
     sp.add_argument('--out-dir', required=True)
+    sp.add_argument('--drop-duplicates',
+                    help='重复书源清单 JSON（去重脚本产出），这些源不进入产出')
     sp.add_argument('--cn-server')
     sp.add_argument('--overseas-server')
+    sp.add_argument('--note', action='append', help='报告附加说明，形如 key=value')
     sp.set_defaults(func=cmd_merge)
+
+    sp = sub.add_parser('deep-repair', help='从真实页面反推并修复目录/正文规则')
+    sp.add_argument('--src', required=True)
+    sp.add_argument('--spec', required=True)
+    sp.add_argument('--result', help='本节点上一次的校验结果，用来筛出深链断裂的书源')
+    sp.add_argument('--out', required=True, help='修复后的书源')
+    sp.add_argument('--report', required=True, help='修复诊断报告')
+    sp.add_argument('--server', required=True)
+    sp.add_argument('--timeout', type=int, default=25)
+    sp.add_argument('--kw', default='修真')
+    sp.add_argument('--only', help='只处理指定下标，逗号分隔')
+    sp.set_defaults(func=cmd_deeprepair)
+
+    sp = sub.add_parser('explore', help='补全缺失的发现页规则（ruleExplore）')
+    sp.add_argument('--src', required=True)
+    sp.add_argument('--out', required=True, help='补全后的书源')
+    sp.add_argument('--report', required=True, help='补全诊断报告')
+    sp.add_argument('--timeout', type=int, default=25)
+    sp.add_argument('--only', help='只处理指定下标，逗号分隔')
+    sp.add_argument('--force', action='store_true',
+                    help='连已经有 ruleExplore.bookList 的书源也重做')
+    sp.set_defaults(func=cmd_explore)
+
+    sp = sub.add_parser('patch', help='把修复/发现页结果合并回书源列表')
+    sp.add_argument('--src', required=True)
+    sp.add_argument('--repair', action='append', help='修复结果文件，可重复')
+    sp.add_argument('--explore', action='append', help='发现页补全结果文件，可重复')
+    sp.add_argument('--out', required=True)
+    sp.set_defaults(func=cmd_patch)
+
+    sp = sub.add_parser('repair', help='从真实结果页反推并修复书源规则')
+    sp.add_argument('--src', required=True)
+    sp.add_argument('--spec', required=True)
+    sp.add_argument('--result', help='本节点上一次的校验结果，用来筛出待修复书源')
+    sp.add_argument('--out', required=True, help='修复后的书源')
+    sp.add_argument('--report', required=True, help='修复诊断报告')
+    sp.add_argument('--server', required=True)
+    sp.add_argument('--timeout', type=int, default=25)
+    sp.add_argument('--kw', default='修真')
+    sp.add_argument('--only', help='只处理指定下标，逗号分隔')
+    sp.set_defaults(func=cmd_repair)
 
     sp = sub.add_parser('report', help='生成 Markdown 报告')
     sp.add_argument('--src', required=True)

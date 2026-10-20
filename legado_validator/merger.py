@@ -4,11 +4,13 @@ import json
 import os
 from collections import Counter
 
+from . import tags
+
 DEAD = {'net_error', 'http_error', 'no_rule'}
 ALIVE = {'ok', 'weak', 'nores', 'blocked', 'api_quirk'}
 UNVERIFIED = {'unsupported', 'error', 'unknown', 'missing'}
 
-TAGS = {'overseas_only': '🌍需外网', 'cn_only': '🇨🇳仅国内'}
+TAGS = {'overseas_only': '🌍需外网', 'cn_only': '🇨🇳仅国内', 'both': '🌐全球可用'}
 
 QUALITY_DESC = {
     'verified': '搜索接口真实返回书单条目（已实测可用）',
@@ -78,23 +80,53 @@ def _tag_note(access, info):
     return ''
 
 
-def merge(sources, results_by_server, cn_server=None, overseas_server=None):
+def merge(sources, results_by_server, cn_server=None, overseas_server=None,
+          overrides_by_server=None, drop_keys=None):
     """合并多节点结果。
 
     results_by_server: {server_name: [result dict, ...]}
+    overrides_by_server: {server_name: {index: result}} —— 修复后重测的结果，
+                         优先级高于 results_by_server（只覆盖同下标的条目）
     cn_server / overseas_server: 用于生成标签文案的节点名（可自动推断）
+    drop_keys: {(书源名, 书源地址)} —— 重复书源清单，这些源不进入任何产出
     """
     servers = list(results_by_server.keys())
     if cn_server is None:
         cn_server = servers[0] if servers else 'cn'
     if overseas_server is None:
         overseas_server = servers[-1] if len(servers) > 1 else cn_server
+    # 传了结果集里不存在的节点名（手滑写错）时退回默认：
+    # 否则该侧会被当成"死节点"，极端情况下整轮书源被误判成两台都死。
+    if servers:
+        if cn_server not in servers:
+            cn_server = servers[0]
+        if overseas_server not in servers:
+            overseas_server = servers[-1]
+    drop_keys = drop_keys or {}
+    if not isinstance(drop_keys, dict):
+        drop_keys = dict((k, None) for k in drop_keys)
     index = {}
     for name, results in results_by_server.items():
         index[name] = dict((r.get('i'), r) for r in results)
+    for name, over in (overrides_by_server or {}).items():
+        index.setdefault(name, {}).update(over)
     kept, removed, overseas, verified = [], [], [], []
+    cn_only, by_group = [], Counter()
+    dropped = []
     stats = Counter()
     for i, source in enumerate(sources):
+        key = (source.get('bookSourceName'), source.get('bookSourceUrl'))
+        if key in drop_keys:
+            record = drop_keys[key] or {}
+            entry = {
+                'bookSourceName': source.get('bookSourceName'),
+                'bookSourceUrl': source.get('bookSourceUrl'),
+            }
+            for k, v in record.items():
+                if k not in ('bookSourceName', 'bookSourceUrl'):
+                    entry[k] = v
+            dropped.append(entry)
+            continue
         info = {}
         for name in servers:
             r = index.get(name, {}).get(i, {})
@@ -107,8 +139,10 @@ def merge(sources, results_by_server, cn_server=None, overseas_server=None):
                 'block': r.get('block'),
                 'deep': (r.get('deep') or {}).get('content'),
             }
-        status_a = info[cn_server]['status']
-        status_b = info[overseas_server]['status']
+        # cn_server / overseas_server 允许指向不在结果集里的名字（例如手滑写错），
+        # 缺失时按 "missing" 处理，而不是直接 KeyError 崩掉整轮合并。
+        status_a = (info.get(cn_server) or {}).get('status', 'missing')
+        status_b = (info.get(overseas_server) or {}).get('status', 'missing')
         verdict, access, quality = classify(status_a, status_b)
         stats['verdict_' + verdict] += 1
         stats['access_' + access] += 1
@@ -128,18 +162,23 @@ def merge(sources, results_by_server, cn_server=None, overseas_server=None):
             })
             continue
         item = dict(source)
-        tag = TAGS.get(access)
-        if tag:
-            payload['tag'] = tag
-            group = str(item.get('bookSourceGroup') or '')
-            if tag not in group:
-                item['bookSourceGroup'] = (group + '·' + tag) if group else tag
-            note = _tag_note(access, {'cn': info[cn_server], 'overseas': info[overseas_server]})
-            comment = str(item.get('bookSourceComment') or '')
-            if note and note not in comment:
-                item['bookSourceComment'] = (note + '\n' + comment).strip()
-            if access == 'overseas_only':
-                overseas.append(item)
+        # ---- 标签重构：内容分类 + 访问范围 + 质量状态 ----
+        new_group = tags.build_groups(item, access, quality)
+        item['bookSourceGroup'] = new_group
+        payload['tags'] = new_group.split(',')
+        payload['group_before'] = source.get('bookSourceGroup')
+        by_group[new_group] += 1
+        note = _tag_note(access, {
+            'cn': info.get(cn_server) or {'status': 'missing'},
+            'overseas': info.get(overseas_server) or {'status': 'missing'},
+        })
+        comment = str(item.get('bookSourceComment') or '')
+        if note and note not in comment:
+            item['bookSourceComment'] = (note + '\n' + comment).strip()
+        if access == 'overseas_only':
+            overseas.append(item)
+        elif access == 'cn_only':
+            cn_only.append(item)
         item['_validation'] = payload
         kept.append(item)
         if quality == 'verified':
@@ -147,25 +186,37 @@ def merge(sources, results_by_server, cn_server=None, overseas_server=None):
     return {
         'kept': kept,
         'removed': removed,
+        'dropped': dropped,
         'overseas': overseas,
+        'cn_only': cn_only,
         'verified': verified,
         'stats': stats,
+        'groups': by_group,
     }
 
 
 def write_outputs(result, out_dir):
-    """写出合集 / 严格可用集 / 需外网集 / 剔除清单。"""
+    """写出合集 / 严格可用集 / 需外网集 / 仅国内集 / 剔除清单。"""
     os.makedirs(out_dir, exist_ok=True)
     paths = {}
     targets = (
         ('final_union.json', result['kept']),
         ('final_verified.json', result['verified']),
         ('needs_overseas.json', result['overseas']),
+        ('cn_only.json', result.get('cn_only') or []),
         ('removed_invalid.json', result['removed']),
+        ('removed_duplicates.json', result.get('dropped') or []),
     )
     for name, data in targets:
         path = os.path.join(out_dir, name)
         with open(path, 'w', encoding='utf-8') as fh:
             json.dump(data, fh, ensure_ascii=False, indent=1)
         paths[name] = path
+    # 标签分布
+    groups = result.get('groups') or {}
+    path = os.path.join(out_dir, 'tag_distribution.json')
+    with open(path, 'w', encoding='utf-8') as fh:
+        json.dump(dict(sorted(groups.items(), key=lambda kv: -kv[1])),
+                  fh, ensure_ascii=False, indent=1)
+    paths['tag_distribution.json'] = path
     return paths

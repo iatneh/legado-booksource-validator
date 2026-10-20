@@ -52,6 +52,10 @@ def _decode(raw, content_type):
     try:
         return raw.decode('utf-8')
     except Exception:
+        pass
+    try:
+        return raw.decode('gb18030')
+    except Exception:
         return raw.decode('latin-1', 'replace')
 
 

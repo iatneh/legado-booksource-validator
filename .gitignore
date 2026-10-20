@@ -21,3 +21,6 @@ dist/
 spec_*.json
 res_*.json
 config/servers.json
+
+# 一次性排查脚本（站点专用的探针/修补脚本，留在本地不入库）
+scripts/scratch/

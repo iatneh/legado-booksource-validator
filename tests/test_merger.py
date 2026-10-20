@@ -95,9 +95,18 @@ class TestMerge(unittest.TestCase):
             'aliyun': [res(i, 'ok') for i in range(len(out['kept']))],
             'rack-nerd': [res(i, 'ok') for i in range(len(out['kept']))],
         })
-        tagged = [s for s in again['kept'] if '🌍需外网' in s['bookSourceGroup']]
-        self.assertEqual(len(tagged), 1)
-        self.assertEqual(tagged[0]['bookSourceGroup'].count('🌍需外网'), 1)
+        # 重算时访问范围标签整体替换，不会叠加出两个
+        for s in again['kept']:
+            self.assertEqual(s['bookSourceGroup'].count('🌍需外网'), 0)
+            self.assertEqual(s['bookSourceGroup'].count('🌐全球可用'), 1)
+
+    def test_group_rebuilt_from_taxonomy(self):
+        # 原始 group 里的"暂不可用"等状态标签要被实测结果替换
+        out = merge(self.sources, self.results)
+        for s in out['kept']:
+            self.assertNotIn('暂不可用', s['bookSourceGroup'])
+            self.assertNotIn('人机验证', s['bookSourceGroup'])
+            self.assertIn('✅实测可用', s['bookSourceGroup'])
 
     def test_verified_subset(self):
         out = merge(self.sources, self.results)
@@ -109,6 +118,53 @@ class TestMerge(unittest.TestCase):
         self.assertIn('servers', v)
         self.assertIn('access', v)
         self.assertIn('quality', v)
+
+
+class TestDropDuplicates(unittest.TestCase):
+    """重复书源剔除：被剔除的源不进入任何产出。"""
+
+    def setUp(self):
+        self.sources = [src('A', 'https://a.com'), src('B', 'https://b.com'),
+                        src('C', 'https://c.com')]
+        self.results = {
+            'aliyun': [res(0, 'ok'), res(1, 'ok'), res(2, 'ok')],
+            'rack-nerd': [res(0, 'ok'), res(1, 'ok'), res(2, 'ok')],
+        }
+
+    def test_dropped_source_leaves_every_output(self):
+        key = ('B', 'https://b.com')
+        out = merge(self.sources, self.results,
+                    drop_keys={key: {'searchEndpoint': 'b.com/s',
+                                      'keptAs': 'A'}})
+        self.assertEqual([s['bookSourceName'] for s in out['kept']], ['A', 'C'])
+        self.assertEqual(len(out['verified']), 2)
+        self.assertEqual(len(out['overseas']), 0)
+        self.assertEqual(len(out['cn_only']), 0)
+
+    def test_dropped_record_keeps_explanation(self):
+        key = ('B', 'https://b.com')
+        out = merge(self.sources, self.results,
+                    drop_keys={key: {'searchEndpoint': 'b.com/s',
+                                      'keptAs': 'A'}})
+        self.assertEqual(len(out['dropped']), 1)
+        d = out['dropped'][0]
+        self.assertEqual(d['bookSourceName'], 'B')
+        self.assertEqual(d['bookSourceUrl'], 'https://b.com')
+        self.assertEqual(d['searchEndpoint'], 'b.com/s')
+        self.assertEqual(d['keptAs'], 'A')
+
+    def test_drop_is_not_counted_as_invalid(self):
+        out = merge(self.sources, self.results,
+                    drop_keys={('B', 'https://b.com'): None})
+        self.assertEqual(len(out['removed']), 0)
+        self.assertEqual(out['stats']['verdict_keep'], 2)
+        self.assertEqual(out['stats']['verdict_invalid'], 0)
+
+    def test_drop_accepts_plain_key_set(self):
+        out = merge(self.sources, self.results,
+                    drop_keys={('B', 'https://b.com')})
+        self.assertEqual(len(out['dropped']), 1)
+        self.assertEqual(len(out['kept']), 2)
 
 
 if __name__ == '__main__':

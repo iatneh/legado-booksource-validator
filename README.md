@@ -16,10 +16,12 @@ Legado 规则引擎（HTML 解析 + CSS / JSONPath 求值）和一个 Node 沙�
 | --- | --- |
 | 规则求值 | 支持 `@css:` 选择器、Legacy `class.x@tag.y@text` 链式规则、`##正则##` 清洗、JSONPath（`$.data[*]`、`a && b`） |
 | JS 规则 | Node 沙箱执行 `@js:` / `<js>` 规则，垫片覆盖 `java.ajax/get/post`、`cookie`、`cache`、`source`、`Packages`、md5/base64 |
-| 深链验证 | 搜索 → 书籍详情 → 目录 → 章节正文，逐级确认 |
+| 深链验证 | 搜索 → 书籍详情 → 目录 → 章节正文，逐级确认；JSON 接口源按条目展开 `{{$.id}}` URL 模板 |
 | 反爬识别 | Cloudflare 挑战、验证码、人机验证、403/404 页面 |
 | 出口 IP 正确 | 请求在目标节点本机发出，国内外可达性结论可信 |
-| 自动打标 | 需外网的源分组名追加 🌍需外网，备注首行写入原因；仅国内的标 🇨🇳仅国内 |
+| 自动打标 | 重组为「内容分类 + 访问范围 + 质量状态」三层标签：🌐全球可用 / 🇨🇳仅国内 / 🌍需外网 + ✅实测可用 / ⚠️搜索失效 / 🔧接口异常 / 🚫人机验证 |
+| 规则修复 | 站点存活但选择器过时（改版）时，从真实页面结构反推新的 bookList/bookUrl/name/author；书单能取到但**书名规则已失效**（阅读里书名为空）的源同样纳入修复 |
+| 发现页补全 | 缺 `ruleExplore` 的源自动补规则；连 `exploreUrl` 都缺的，从首页导航合成分类入口 |
 
 ## 安装
 
@@ -52,11 +54,31 @@ python3 -m legado_validator resolve --src bookSource.json --out dist/spec.json
 python3 -m legado_validator validate --src bookSource.json \
     --spec dist/spec.json --out dist/res_aliyun.json --server aliyun
 
-# 3. 合并多节点结果，取合集并打标签
-python3 -m legado_validator merge --src bookSource.json \
+# 3. 修复"站点活着但选择器过时"的书源
+python3 -m legado_validator repair --src bookSource.json \
+    --spec dist/spec.json --result dist/res_aliyun.json \
+    --out dist/fixed.json --report dist/repair_report.json --server aliyun
+
+# 4. 补全缺失的发现页规则
+python3 -m legado_validator explore --src bookSource.json \
+    --out dist/explore_fixed.json --report dist/explore_report.json
+# 只处理指定下标（不会覆盖已有 ruleExplore 的源；确实要重做就加 --force）
+python3 -m legado_validator explore --src bookSource.json --only 12,45,88 \
+    --out dist/explore_fixed.json --report dist/explore_report.json
+
+# 5. 把修复/补全结果合并回书源
+python3 -m legado_validator patch --src bookSource.json \
+    --repair aliyun=dist/fixed.json --explore aliyun=dist/explore_fixed.json \
+    --out dist/patched.json
+
+# 6. 合并多节点结果，取合集并打标签
+python3 -m legado_validator merge --src dist/patched.json \
     --result aliyun=dist/res_aliyun.json \
     --result rack-nerd=dist/res_rack-nerd.json --out-dir dist
 ```
+
+`merge` 支持 `--override aliyun=dist/res_fixed.json`：修复后重测的结果按
+下标覆盖原结果，保证最终书源里的规则和校验结论出自同一份规则。
 
 ## 产出
 
@@ -65,8 +87,26 @@ python3 -m legado_validator merge --src bookSource.json \
 | `final_union.json` | 合集书源，可直接导入阅读；每条带 `_validation` 校验元数据 |
 | `final_verified.json` | 严格子集：搜索接口真实返回过书单条目的源 |
 | `needs_overseas.json` | 仅海外可访问（需外网）的源，已打 🌍需外网 标签 |
+| `cn_only.json` | 仅国内可访问的源，已打 🇨🇳仅国内 标签 |
 | `removed_invalid.json` | 被剔除的源及每个节点上的失败原因 |
-| `report.md` | Markdown 报告：质量分布 / 访问范围分布 / 各类清单 |
+| `tag_distribution.json` | 重组后的标签组合分布 |
+| `report.md` | Markdown 报告：质量分布 / 访问范围分布 / 标签分布 / 各类清单 |
+
+## 标签体系
+
+原始 `bookSourceGroup` 把「内容分类」「站点状态」「访问通道」混在一起，
+且存在重复写法（`正版` / `正版书源 🏷`）。合并后按三层重新组织，
+顺序固定为 **内容分类 → 访问范围 → 质量状态**：
+
+| 层 | 标签 | 来源 |
+| --- | --- | --- |
+| 内容分类 | 快速书源 ⚡ / 通常书源 📂 / 文本书源 📚 / 漫画书源 🎨 / 图片书源 📷 / 有声书源 🔊 / 影视频源 🎬 / 轻文书源 📘 / 出版书源 🏛 / 正版书源 🏷 / 同人书源 🎭 / 特殊书源 🔞 / 下载书源 📥 / 文件书源 📦 / 聚合书源 🗂 / 代理书源 🪜 / API 书源 🔌 | 原始标签归一；缺失时按 `bookSourceType` 兜底 |
+| 访问范围 | 🌐全球可用 / 🇨🇳仅国内 / 🌍需外网 / ❓访问范围未知 | 两台节点实测 |
+| 质量状态 | ✅实测可用 / ⚠️搜索失效 / 🔧接口异常 / 🚫人机验证 / ❓未验证 | 两台节点实测 |
+
+原始的 `人机验证-搜索`、`暂不可用`、`搜索暂不可用` 属于**站点状态**，
+一律丢弃并由实测结果重新推导——校验通过的书源不该再挂着「暂不可用」。
+`梯子` 会被保留为 `🪜需代理` 标记。
 
 ## 判定规则
 
@@ -98,12 +138,33 @@ legado_validator/
   rules.py       # 请求构造、响应解析、关键词替换
   http.py        # 抓取、限速、反爬识别
   validator.py   # 校验主流程 + 深链验证
+  repair.py      # 从真实结果页反推搜索规则
+  explore.py     # 发现页规则补全 + 首页合成分类入口
+  tags.py        # 标签体系重构（分类 / 访问范围 / 质量状态）
+  patcher.py     # 把修复与发现页结果合并回书源
   merger.py      # 多节点合并、取合集、打标签
   reporter.py    # Markdown 报告
   cli.py         # 命令行入口
   js/resolve.js  # Node 沙箱：执行 `js:` 规则
-tests/           # 单元测试（unittest，57 条）
+  js/legado_js.js # 沙箱底座：HTML 解析 + CSS 选择器 + Jsoup 风格 API
+tests/           # 单元测试（unittest，151 条）
 ```
+
+## 规则引擎与 Legado 的语义对齐
+
+引擎的行为按 Legado 官方源码（`AnalyzeRule.kt` / `AnalyzeByJSoup.kt` /
+`JsExtensions.kt`）逐条核实，几处容易踩坑的地方：
+
+| 场景 | Legado 行为 | 本项目 |
+| --- | --- | --- |
+| `bookList` / `chapterList` 末段 | `getElements` → `ElementsSingle`，末段是**选择器**（tag/class/id/`children`） | 同左；`children` 取直接子元素 |
+| `name` / `author` / `bookUrl` 末段 | `getStringList` → `getResultLast`，末段是**属性名** | 同左 |
+| `:nth-child(n)` | 父节点下第 n 个**子元素**（不分标签） | 同左 |
+| `:nth-of-type(n)` | 父节点下第 n 个**同标签**子元素 | 同左 |
+| `:eq(n)` | 整个匹配集合里的第 n 个 | 同左（集合层处理） |
+| `A + B` / `A ~ B` | 兄弟关系 | 同左（原先被当后代） |
+| `##正则##替换##` | 第四段非空时只取第一个匹配做替换，匹配不到返回空串 | 同左 |
+| `java.ajax` / `java.get` | `ajax` 返回 String，`get/post` 返回 Jsoup Response | 同左 |
 
 ## 开发
 

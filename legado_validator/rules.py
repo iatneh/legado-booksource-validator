@@ -64,17 +64,24 @@ def abs_url(base, href):
 
 
 def swap_kw(spec, old_kw, new_kw):
-    """把已构造好的请求里的关键词换成另一个；没命中返回 None。"""
-    o = quote(old_kw)
-    n = quote(new_kw)
+    """把已构造好的请求里的关键词换成另一个；没命中返回 None。
+
+    关键词在 URL 里可能已经被 percent-encode，也可能还是原样；两种形式
+    都要能替换上，否则关键词轮换会静默失效（换词后请求的还是旧词）。
+    """
     out = dict(spec)
     hit = False
-    if o in (out.get('url') or ''):
-        out['url'] = out['url'].replace(o, n)
-        hit = True
-    if out.get('body') and o in str(out['body']):
-        out['body'] = str(out['body']).replace(o, n)
-        hit = True
+    for o, n in ((quote(old_kw), quote(new_kw)), (old_kw, new_kw)):
+        if o and o in (out.get('url') or ''):
+            out['url'] = out['url'].replace(o, n)
+            hit = True
+            break
+    if out.get('body'):
+        for o, n in ((quote(old_kw), quote(new_kw)), (old_kw, new_kw)):
+            if o and o in str(out['body']):
+                out['body'] = str(out['body']).replace(o, n)
+                hit = True
+                break
     return out if hit else None
 
 
